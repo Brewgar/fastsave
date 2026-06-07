@@ -1,9 +1,91 @@
-# fastsave
-A Minecraft mod to make your generated chunks to write into your ssd faster while running mods like Chunky and prevent your memory from filling up.
+# FastSave — Async Batch Chunk I/O for Minecraft 1.20.1 (Fabric)
 
-I kept running into the same problem: my RAM would fill up while playing Minecraft, and the game would start stuttering badly whenever it tried to save chunks. It wasn't a fancy server setup or anything — just me playing, watching the memory climb, and waiting for the freezes to stop.
-After a while I got annoyed enough to actually look into why. Turns out Minecraft's default chunk saving is pretty naive — it blocks the main thread and writes each chunk one by one with small, scattered disk operations. On a busy world with a lot of loaded chunks, this creates a traffic jam between RAM and disk, and your game feels it.
-So I wrote this mod. FastSave hooks into the chunk saving pipeline and pre-serializes chunk data before it hits the disk, tracking writes asynchronously instead of making the game wait. It's not a miracle fix, but it takes some of the pressure off and makes the whole process a bit less painful.
-Built for Minecraft 1.20.1 with Fabric.
+Minecraft, chunk'ları diske yazarken ana I/O thread'ini bloklar ve her chunk için
+ayrı küçük bir `FileChannel.write()` çağrısı yapar.  FastSave bunu şöyle düzeltir:
 
-If you run into some issues, contact me on discord: brewgar
+```
+Oyun thread'i
+    │
+    ▼  enqueue() — nanosaniye seviyesinde, bloklamaz
+  LinkedBlockingQueue<WriteTask>  (kapasite: 512)
+    │
+    ▼  her 50 ms (1 tick)
+  I/O Worker Thread
+    │  ─ region dosyasına göre gruplar
+    │  ─ offset'e göre sıralar (sequential I/O)
+    ▼
+  AsynchronousFileChannel.write()   ← NIO async, OS'a bırakır
+    │
+    ▼
+  SSD  (büyük, sıralı yazma — küçük rastgele yazma değil)
+```
+
+## Kurulum
+
+### Gereksinimler
+- JDK 17+ (17 veya 21)
+- Fabric Loader 0.14.22+
+- Fabric API 0.83.0+1.20.1
+
+### Derleme
+
+```bash
+# gradle-wrapper.jar'ı indirmek için (ilk seferinde internet gerekir):
+./gradlew build
+
+# Çıktı:
+#   build/libs/fastsave-1.0.0.jar
+```
+
+### Yükleme
+
+1. `build/libs/fastsave-1.0.0.jar` dosyasını Minecraft `mods/` klasörüne koy.
+2. Fabric API'nin de `mods/` içinde olduğundan emin ol.
+3. Oyunu başlat.  Log'da şunu görmelisin:
+   ```
+   [FastSave] Loaded. Async batch chunk I/O active.
+   ```
+
+## Ayarlar (`FastSaveConfig.java`)
+
+| Sabit | Varsayılan | Açıklama |
+|---|---|---|
+| `QUEUE_CAPACITY` | 512 | Kuyruk dolarsa caller bloklanır |
+| `FLUSH_INTERVAL_MS` | 50 | Kaç ms'de bir batch flush (1 tick) |
+| `WORKER_THREADS` | 1 | Tek SSD için 1 idealdir |
+| `WRITE_BUFFER_BYTES` | 2 MiB | Worker başına buffer boyutu |
+
+## Nasıl çalışır?
+
+### Mixin Noktası
+
+`StorageIoWorker#setResult` — chunk/poi/entity NBT verisi diske yazılmadan önce
+buradan geçer.  Mixin bu noktayı yakalar:
+
+1. NBT → byte[] olarak serialize eder (ZLIB, vanilla formatı)
+2. Hangi `.mca` dosyasına ve hangi offset'e yazılacağını çözer
+3. `AsyncChunkWriteQueue.enqueue()` ile kuyruğa ekler
+4. Vanilla'nın write path'ini iptal eder, kendi `CompletableFuture`'ını döner
+
+Vanilla'nın in-memory sektör tablosu (`RegionFile`) güncellenmeden önce sektör
+ayrılmamışsa (`sectorIndex == 0`) mixin devreye girmez ve vanilla devam eder.
+Bu sayede **hiçbir veri kaybı** yaşanmaz.
+
+### Async Write Queue
+
+- `LinkedBlockingQueue` — thread-safe, bounded
+- `ScheduledExecutorService` — daemon thread, oyunun altında çalışır
+- `drainTo()` ile tek seferde toplu çekme
+- `AsynchronousFileChannel` — OS-level async I/O, thread bloklamaz
+- Kapanışta (shutdown hook) tüm bekleyen yazılar tamamlanır
+
+## Uyumluluk
+
+- ✅ Vanilla Fabric sunucu
+- ✅ Singleplayer
+- ⚠️  Lithium ile birlikte kullanımda Mixin çakışması olabilir (test et)
+- ⚠️  Distant Horizons gibi chunk yönetimini değiştiren modlarla dikkatli ol
+
+## Lisans
+
+MIT
