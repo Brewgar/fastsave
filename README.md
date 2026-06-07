@@ -24,6 +24,10 @@ Game Thread
 
 ## Installation
 
+
+You can directly download the JAR file from the releases tab but if you want to build it yourself:
+
+
 ### Requirements
 
 * JDK 17 or 21
